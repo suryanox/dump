@@ -1,0 +1,15 @@
+{
+  "name": "demo-extension",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "demo_extension_bg.wasm",
+    "demo_extension.js",
+    "demo_extension.d.ts"
+  ],
+  "main": "demo_extension.js",
+  "types": "demo_extension.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
