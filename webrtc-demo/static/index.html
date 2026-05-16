@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WebRTC Audio Call</title>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 60px auto; }
+    button { padding: 8px 18px; margin-right: 8px; cursor: pointer; }
+    #status { margin-top: 16px; font-weight: bold; }
+    #log { margin-top: 12px; font-size: 0.82em; color: #555; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>WebRTC P2P Audio Call</h2>
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+
+  <div id="status">Idle</div>
+  <div id="log"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl    = document.getElementById('log');
+
+    function log(msg) { logEl.textContent += msg + '\n'; }
+    function setStatus(msg) { statusEl.textContent = msg; log('[status] ' + msg); }
+
+    let pc, stream, ws;
+    let remoteDescSet = false;
+    let iceCandidateQueue = [];
+
+    document.getElementById('start').onclick = async () => {
+      document.getElementById('start').disabled = true;
+      logEl.textContent = '';
+      remoteDescSet = false;
+      iceCandidateQueue = [];
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        setStatus('Microphone acquired');
+
+        pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+        stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+        pc.ontrack = ({ streams, track }) => {
+          log('[track] Remote track received: ' + track.kind + ' id=' + track.id);
+          const audio = document.createElement('audio');
+          audio.srcObject = streams[0] ?? new MediaStream([track]);
+          audio.autoplay = true;
+          document.body.appendChild(audio);
+          audio.play().catch(err => {
+            log('[track] Autoplay blocked — click anywhere to unmute: ' + err.message);
+            document.addEventListener('click', () => audio.play(), { once: true });
+          });
+        };
+
+        pc.onicecandidate = ({ candidate }) => {
+          if (candidate && ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ice', candidate: candidate.toJSON() }));
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          log('[pc] connectionState=' + pc.connectionState);
+          if (pc.connectionState === 'connected') setStatus('Connected — audio active');
+          if (pc.connectionState === 'failed')    setStatus('Connection failed');
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          log('[ice] iceConnectionState=' + pc.iceConnectionState);
+        };
+
+        pc.onicegatheringstatechange = () => {
+          log('[ice] gatheringState=' + pc.iceGatheringState);
+        };
+
+        ws = new WebSocket('ws://' + location.host + '/ws');
+        ws.onopen  = () => log('[ws] connected');
+        ws.onerror = () => log('[ws] error');
+        ws.onclose = () => log('[ws] closed');
+
+        ws.onmessage = async ({ data }) => {
+          const msg = JSON.parse(data);
+
+          if (msg.type === 'wait') {
+            setStatus('Waiting for second tab to open...');
+          }
+
+          if (msg.type === 'paired' && msg.initiator) {
+            setStatus('Peer joined — creating offer...');
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
+          }
+
+          if (msg.type === 'paired' && !msg.initiator) {
+            setStatus('Paired — waiting for offer...');
+          }
+
+          if (msg.type === 'offer') {
+            await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+            remoteDescSet = true;
+            for (const c of iceCandidateQueue) await pc.addIceCandidate(c);
+            iceCandidateQueue = [];
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription.sdp }));
+          }
+
+          if (msg.type === 'answer') {
+            await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+            remoteDescSet = true;
+            for (const c of iceCandidateQueue) await pc.addIceCandidate(c);
+            iceCandidateQueue = [];
+          }
+
+          if (msg.type === 'ice') {
+            if (remoteDescSet) {
+              await pc.addIceCandidate(msg.candidate);
+            } else {
+              iceCandidateQueue.push(msg.candidate);
+            }
+          }
+        };
+
+        document.getElementById('stop').disabled = false;
+      } catch (err) {
+        setStatus('Error: ' + err.message);
+        document.getElementById('start').disabled = false;
+      }
+    };
+
+    document.getElementById('stop').onclick = () => {
+      ws?.close();
+      pc?.close();
+      stream?.getTracks().forEach(t => t.stop());
+      document.querySelectorAll('audio').forEach(a => a.remove());
+      remoteDescSet = false;
+      iceCandidateQueue = [];
+      setStatus('Idle');
+      document.getElementById('start').disabled  = false;
+      document.getElementById('stop').disabled = true;
+    };
+  </script>
+</body>
+</html>
